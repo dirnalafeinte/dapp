@@ -19,6 +19,10 @@ function App() {
     sellerAddress: '',
     rating: 1
   });
+  const [updatePriceData, setUpdatePriceData] = useState({
+    fruitId: null,
+    newPrice: ''
+  });
 
   // Separate function to initialize contract
   const initializeContract = async (web3Instance) => {
@@ -101,7 +105,61 @@ function App() {
     }
   };
 
+  // Function to load fruits without requiring wallet connection
+  const loadFruitsPublic = async () => {
+    try {
+      // Create a read-only web3 instance
+      const readOnlyWeb3 = new Web3(new Web3.providers.HttpProvider('http://localhost:8545'));
+      
+      // Get network ID
+      const networkId = await readOnlyWeb3.eth.net.getId();
+      console.log("Network ID (public):", networkId);
+      
+      // Get contract instance
+      const deployedNetwork = FruitMarketplaceContract.networks[networkId];
+      if (!deployedNetwork) {
+        throw new Error(`Contract not deployed on network ${networkId}`);
+      }
+      
+      const contractInstance = new readOnlyWeb3.eth.Contract(
+        FruitMarketplaceContract.abi,
+        deployedNetwork.address
+      );
+      
+      console.log("Contract address (public):", deployedNetwork.address);
+      
+      // Load fruits
+      const fruitCount = await contractInstance.methods.getFruitCount().call();
+      const fruitsList = [];
+
+      for (let i = 0; i < fruitCount; i++) {
+        const fruit = await contractInstance.methods.getFruit(i).call();
+        const rating = await contractInstance.methods.getSellerAverageRating(fruit.seller).call();
+        
+        fruitsList.push({
+          id: i,
+          name: fruit.name,
+          price: readOnlyWeb3.utils.fromWei(fruit.price, 'ether'),
+          seller: fruit.seller,
+          isAvailable: fruit.isAvailable,
+          hasPurchased: false, // Default to false for public view
+          rating: rating > 0 ? rating : null
+        });
+      }
+
+      setFruits(fruitsList);
+      setLoading(false);
+    } catch (error) {
+      console.error("Error loading fruits (public):", error);
+      setError("Failed to load fruits: " + error.message);
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
+    // Load fruits immediately without requiring wallet connection
+    loadFruitsPublic();
+    
     const checkConnection = async () => {
       if (window.ethereum) {
         try {
@@ -130,7 +188,8 @@ function App() {
         } else {
           setAccounts([]);
           setIsConnected(false);
-          setFruits([]);
+          // Load public fruits when disconnected
+          await loadFruitsPublic();
         }
       };
 
@@ -259,6 +318,41 @@ function App() {
     }
   };
 
+  const updateFruitPrice = async () => {
+    try {
+      setError(null);
+      if (!web3 || !contract || !accounts[0]) {
+        setError('Please connect your wallet first');
+        return;
+      }
+
+      const { fruitId, newPrice } = updatePriceData;
+      
+      if (fruitId === null || !newPrice) {
+        setError('Please select a fruit and enter a new price');
+        return;
+      }
+
+      // Convert price to wei
+      const priceInWei = web3.utils.toWei(newPrice, 'ether');
+      
+      // Update the fruit price
+      await contract.methods.updateFruitPrice(fruitId, priceInWei).send({ 
+        from: accounts[0],
+        gas: 300000
+      });
+      
+      // Reset form and reload fruits
+      setUpdatePriceData({ fruitId: null, newPrice: '' });
+      await loadFruits();
+      
+      setError('Price updated successfully!');
+    } catch (error) {
+      console.error("Error updating fruit price:", error);
+      setError('Failed to update price: ' + error.message);
+    }
+  };
+
   if (loading && !isConnected) {
     return (
       <div className="App">
@@ -291,28 +385,36 @@ function App() {
 
       {error && <div className="error-message">{error}</div>}
 
+      {/* Available Fruits section - shown to all users */}
+      <section className="marketplace-section">
+        <h2 className="section-title">Available Fruits</h2>
+        <div className="fruits-grid">
+          {fruits.filter(fruit => fruit.isAvailable).map(fruit => (
+            <div key={fruit.id} className="fruit-card">
+              <div className="fruit-image">
+                {fruit.name.charAt(0).toUpperCase()}
+              </div>
+              <div className="fruit-content">
+                <h3>{fruit.name}</h3>
+                <p className="price">{fruit.price} ETH</p>
+                <p className="seller">Seller: {fruit.seller.slice(0, 6)}...{fruit.seller.slice(-4)}</p>
+                {isConnected ? (
+                  <button onClick={() => purchaseFruit(fruit.id, fruit.price)}>
+                    Purchase
+                  </button>
+                ) : (
+                  <button onClick={connectWallet}>
+                    Connect Wallet to Purchase
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
       {isConnected && (
         <>
-          <section className="marketplace-section">
-            <h2 className="section-title">Available Fruits</h2>
-            <div className="fruits-grid">
-              {fruits.filter(fruit => fruit.isAvailable).map(fruit => (
-                <div key={fruit.id} className="fruit-card">
-                  <div className="fruit-image">
-                    {fruit.name.charAt(0).toUpperCase()}
-                  </div>
-                  <div className="fruit-content">
-                    <h3>{fruit.name}</h3>
-                    <p className="price">{fruit.price} ETH</p>
-                    <p className="seller">Seller: {fruit.seller.slice(0, 6)}...{fruit.seller.slice(-4)}</p>
-                    <button onClick={() => purchaseFruit(fruit.id, fruit.price)}>
-                      Purchase
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
 
           <section className="marketplace-section">
             <h2 className="section-title">Your Purchases</h2>
@@ -383,12 +485,84 @@ function App() {
             </div>
           </section>
 
+          {/* Your Listed Fruits section */}
+          <section className="marketplace-section">
+            <h2 className="section-title">Your Listed Fruits</h2>
+            <div className="fruits-grid">
+              {fruits.filter(fruit => fruit.isAvailable && fruit.seller.toLowerCase() === accounts[0].toLowerCase()).map(fruit => (
+                <div key={fruit.id} className="fruit-card">
+                  <div className="fruit-image">
+                    {fruit.name.charAt(0).toUpperCase()}
+                  </div>
+                  <div className="fruit-content">
+                    <h3>{fruit.name}</h3>
+                    <p className="price">{fruit.price} ETH</p>
+                    <p className="seller">Listed by you</p>
+                    <button 
+                      onClick={() => setUpdatePriceData({ ...updatePriceData, fruitId: fruit.id })}
+                      className="select-button"
+                    >
+                      Select to Update Price
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {fruits.filter(fruit => fruit.isAvailable && fruit.seller.toLowerCase() === accounts[0].toLowerCase()).length === 0 && (
+              <p className="no-items-message">You haven't listed any fruits yet.</p>
+            )}
+          </section>
+
+          {/* Update Price Section - Separate dedicated section */}
+          <section className="update-price-section">
+            <h2 className="section-title">Update Fruit Price</h2>
+            <div className="form-container">
+              <form onSubmit={(e) => {
+                e.preventDefault();
+                updateFruitPrice();
+              }}>
+                <div className="form-group">
+                  <label>Selected Fruit</label>
+                  <div className="selected-fruit">
+                    {updatePriceData.fruitId !== null ? (
+                      <div>
+                        <p><strong>Name:</strong> {fruits.find(f => f.id === updatePriceData.fruitId)?.name}</p>
+                        <p><strong>Current Price:</strong> {fruits.find(f => f.id === updatePriceData.fruitId)?.price} ETH</p>
+                      </div>
+                    ) : (
+                      <p>No fruit selected. Please select a fruit from your listings above.</p>
+                    )}
+                  </div>
+                </div>
+                <div className="form-group">
+                  <label>New Price (ETH)</label>
+                  <input
+                    type="number"
+                    step="0.001"
+                    value={updatePriceData.newPrice}
+                    onChange={(e) => setUpdatePriceData({ ...updatePriceData, newPrice: e.target.value })}
+                    placeholder="Enter new price in ETH"
+                    required
+                    disabled={updatePriceData.fruitId === null}
+                  />
+                </div>
+                <button 
+                  type="submit" 
+                  className="connect-button"
+                  disabled={updatePriceData.fruitId === null}
+                >
+                  Update Price
+                </button>
+              </form>
+            </div>
+          </section>
+
           <section className="marketplace-section">
             <h2 className="section-title">Rate a Seller</h2>
             <div className="form-container">
               <form onSubmit={(e) => {
                 e.preventDefault();
-                // Implement rating functionality
+                rateSeller(ratingData.sellerAddress, ratingData.rating);
               }}>
                 <div className="form-group">
                   <label>Seller Address</label>
@@ -409,12 +583,11 @@ function App() {
                     max="5"
                     name="rating"
                     value={ratingData.rating}
-                    onChange={(e) => setRatingData({ ...ratingData, rating: e.target.value })}
-                    placeholder="Enter rating from 1 to 5"
+                    onChange={(e) => setRatingData({ ...ratingData, rating: parseInt(e.target.value) })}
                     required
                   />
                 </div>
-                <button type="submit" className="connect-button">Submit Rating</button>
+                <button type="submit" className="connect-button">Rate Seller</button>
               </form>
             </div>
           </section>
